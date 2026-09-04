@@ -31,7 +31,9 @@ void main()
 }
 """
 
-# GLSL 330 Fragment Shader with Smooth Tile Edge Blending & Organic Noise Jitter
+# GLSL 330 Fragment Shader with Reversed Elevation Tile Assignment
+# Highest altitude (h = 1.0) -> Tiles 0 & 1
+# Lowest altitude (h = 0.0) -> Tiles 12 & 13
 const FragmentShader = """
 #version 330
 
@@ -57,10 +59,16 @@ float hash(vec2 p) {
     return fract(p.x * p.y);
 }
 
+// Sample tile from 2048x2048 atlas with 2px inset margin (508px usable out of 512px)
 vec4 sampleTile(int tileID, vec2 localUV) {
     int col = tileID % 4;
     int row = tileID / 4;
-    vec2 atlasUV = (vec2(col, row) + localUV) * 0.25;
+    
+    // Inset 2px from top/left, taking 4px total off width & height
+    vec2 insetUV = (vec2(2.0) + localUV * 508.0) / 2048.0;
+    vec2 tileOriginUV = vec2(float(col), float(row)) * 0.25;
+    vec2 atlasUV = tileOriginUV + insetUV;
+    
     return texture(texture0, atlasUV);
 }
 
@@ -75,7 +83,7 @@ void main()
     // Sample continuous height at this point (0.0 to 1.0)
     float h = clamp(texture(texture1, fragTexCoord).r + noiseJitter, 0.0, 1.0);
 
-    // Continuous elevation pair index (0.0 to 6.0)
+    // Continuous elevation index (0.0 at highest altitude, 6.0 at lowest altitude)
     float val = (1.0 - h) * 6.0;
     int pairA = int(floor(val));
     int pairB = min(pairA + 1, 6);
@@ -88,14 +96,17 @@ void main()
     ivec2 cellPos = ivec2(floor(gridCoord));
     int offset = int(hash(vec2(cellPos)) * 2.0);
 
-    int tileA = (6 - pairA) * 2 + offset;
-    int tileB = (6 - pairB) * 2 + offset;
+    // Reversed Tile Mapping:
+    // Highest altitude (pairA = 0) -> Tiles 0 & 1
+    // Lowest altitude (pairA = 6) -> Tiles 12 & 13
+    int tileA = pairA * 2 + offset;
+    int tileB = pairB * 2 + offset;
 
     vec4 colorA = sampleTile(tileA, tileUV);
     vec4 colorB = sampleTile(tileB, tileUV);
 
-    // Smooth S-curve blend (smoothstep) between neighboring tiles
-    float blend = smoothstep(0.25, 0.75, fracWeight);
+    // Smooth S-curve blend between neighboring tiles
+    float blend = smoothstep(0.15, 0.95, fracWeight);
     vec4 texColor = mix(colorA, colorB, blend);
 
     // Lighting calculation

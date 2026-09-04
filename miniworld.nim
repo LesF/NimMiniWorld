@@ -31,10 +31,7 @@ void main()
 }
 """
 
-# GLSL 330 Fragment Shader
-# Raylib automatically binds:
-# texture0 -> material.maps[Albedo] (tileset01.png)
-# texture1 -> material.maps[Metalness] (tileMapTex)
+# GLSL 330 Fragment Shader with Smooth Tile Edge Blending & Organic Noise Jitter
 const FragmentShader = """
 #version 330
 
@@ -46,32 +43,60 @@ in vec3 fragNormal;
 out vec4 finalColor;
 
 uniform sampler2D texture0;    // tileset01.png (2048x2048 atlas)
-uniform sampler2D texture1;    // 256x256 tile ID map (R channel = tileID)
+uniform sampler2D texture1;    // 256x256 normalized heightmap texture
 uniform vec4 colDiffuse;
 uniform vec3 lightDir;
 uniform vec4 lightColor;
 uniform vec4 ambientLight;
 uniform vec3 viewPos;
 
+// Pseudo-random noise for organic edge smudging/jitter
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+vec4 sampleTile(int tileID, vec2 localUV) {
+    int col = tileID % 4;
+    int row = tileID / 4;
+    vec2 atlasUV = (vec2(col, row) + localUV) * 0.25;
+    return texture(texture0, atlasUV);
+}
+
 void main()
 {
     // Grid coordinate (0.0 to 256.0) across terrain
     vec2 gridCoord = fragTexCoord * 256.0;
 
-    // Local UV inside the tile (0.0 to 1.0)
+    // Organic noise wobble to smudge hard grid boundaries
+    float noiseJitter = (hash(floor(gridCoord)) - 0.5) * 0.08;
+    
+    // Sample continuous height at this point (0.0 to 1.0)
+    float h = clamp(texture(texture1, fragTexCoord).r + noiseJitter, 0.0, 1.0);
+
+    // Continuous elevation pair index (0.0 to 6.0)
+    float val = (1.0 - h) * 6.0;
+    int pairA = int(floor(val));
+    int pairB = min(pairA + 1, 6);
+    float fracWeight = fract(val);
+
+    // Local UV inside tile (0.0 to 1.0)
     vec2 tileUV = fract(gridCoord);
 
-    // Look up tileID from texture1 (fetch R channel scaled by 255)
-    ivec2 cellPos = clamp(ivec2(floor(gridCoord)), ivec2(0), ivec2(255));
-    int tileID = int(texelFetch(texture1, cellPos, 0).r * 255.0 + 0.5);
+    // Spatial hash for picking between pair of tiles
+    ivec2 cellPos = ivec2(floor(gridCoord));
+    int offset = int(hash(vec2(cellPos)) * 2.0);
 
-    // Calculate atlas UV (4x4 tileset -> 0.25 scale per tile)
-    int col = tileID % 4;
-    int row = tileID / 4;
-    vec2 atlasUV = (vec2(col, row) + tileUV) * 0.25;
+    int tileA = (6 - pairA) * 2 + offset;
+    int tileB = (6 - pairB) * 2 + offset;
 
-    // Sample texture atlas
-    vec4 texColor = texture(texture0, atlasUV);
+    vec4 colorA = sampleTile(tileA, tileUV);
+    vec4 colorB = sampleTile(tileB, tileUV);
+
+    // Smooth S-curve blend (smoothstep) between neighboring tiles
+    float blend = smoothstep(0.25, 0.75, fracWeight);
+    vec4 texColor = mix(colorA, colorB, blend);
 
     // Lighting calculation
     vec3 normal = normalize(fragNormal);
@@ -90,56 +115,17 @@ void main()
 }
 """
 
-# Deterministic hash to pick between pair of tiles (0 or 1 offset)
-proc tileHash(x, z: int): int =
-  var h = (x.uint32 * 374761393'u32) + (z.uint32 * 668265263'u32)
-  h = (h xor (h shr 13)) * 1274126177'u32
-  return int(h and 0x7FFFFFFF'u32)
-
-initWindow(1200, 800, "Nim Mini World - 3D Terrain with Elevation Tile Atlas")
+initWindow(1200, 800, "Nim Mini World - 3D Terrain with Blended Elevation Tiles")
 setTargetFPS(60)
 
 # Load heightmap image
 let heightmapImg = loadImage("assets/heights01.png")
 
-# Store height values and calculate min/max heights
-var heightGrid: array[GridSize, array[GridSize, float32]]
-var minH = 255.0'f32
-var maxH = 0.0'f32
+# Create GPU heightmap texture (texture1) with Bilinear filtering for smooth transitions
+var heightMapTex = loadTextureFromImage(heightmapImg)
+setTextureFilter(heightMapTex, Bilinear)
 
-for z in 0..<GridSize:
-  for x in 0..<GridSize:
-    let h = float32(getImageColor(heightmapImg, int32(x), int32(z)).r)
-    heightGrid[x][z] = h
-    if h < minH: minH = h
-    if h > maxH: maxH = h
-
-let rangeH = if maxH > minH: (maxH - minH) else: 1.0'f32
-
-# Build 256x256 tile map image mapping elevation to 7 tile pairs
-var tileMapImg = genImageColor(GridSize.int32, GridSize.int32, Black)
-for z in 0..<GridSize:
-  for x in 0..<GridSize:
-    let h = heightGrid[x][z]
-    let normH = clamp((h - minH) / rangeH, 0.0, 1.0)
-    
-    # Map normalized elevation [0..1] into 7 pairs (0..6)
-    # pair 0 (lowest) -> tiles 12 & 13
-    # pair 6 (highest) -> tiles 0 & 1
-    var pairIdx = int(normH * 7.0)
-    if pairIdx > 6: pairIdx = 6
-    
-    let baseTile = (6 - pairIdx) * 2
-    let offset = tileHash(x, z) mod 2
-    let tileId = uint8(baseTile + offset)
-    
-    imageDrawPixel(tileMapImg, x.int32, z.int32, Color(r: tileId, g: 0, b: 0, a: 255))
-
-# Create GPU texture for tile map and set Point filtering (no blur between tile IDs)
-var tileMapTex = loadTextureFromImage(tileMapImg)
-setTextureFilter(tileMapTex, Point)
-
-# Load 4x4 tileset texture atlas
+# Load 4x4 tileset texture atlas (texture0)
 var tilesetTex = loadTexture("assets/tileset01.png")
 genTextureMipmaps(tilesetTex)
 setTextureFilter(tilesetTex, Trilinear)
@@ -171,10 +157,10 @@ setShaderValue(shader, locAmbient, ambientColor)
 
 # Attach shader & textures to map model material
 # texture0 -> Albedo (tilesetTex)
-# texture1 -> Metalness (tileMapTex)
+# texture1 -> Metalness (heightMapTex)
 Model(mapModel).materials[0].shader = shader
 Model(mapModel).materials[0].maps[Albedo].texture = tilesetTex
-Model(mapModel).materials[0].maps[Metalness].texture = tileMapTex
+Model(mapModel).materials[0].maps[Metalness].texture = heightMapTex
 
 # Position sun indicator in sky
 let sunPos = Vector3(x: 120.0, y: 240.0, z: 70.0)
@@ -199,7 +185,7 @@ while not windowShouldClose():
   clearBackground(Raywhite)
   
   beginMode3D(camera)
-  # Draw 3D floor terrain model with elevation tile map shader
+  # Draw 3D floor terrain model with blended tile shader
   drawModel(Model(mapModel), mapPos, 1.0, White)
   
   # Draw visual sun sphere in sky
@@ -209,7 +195,7 @@ while not windowShouldClose():
   endMode3D()
 
   drawFPS(10, 10)
-  drawText("Free Camera: WASD + Q/E + Mouse | Elevation Tile Atlas Active", 10, 35, 20, Darkgray)
+  drawText("Free Camera: WASD + Q/E + Mouse | Blended Tile Edges Active", 10, 35, 20, Darkgray)
   endDrawing()
 
 closeWindow()

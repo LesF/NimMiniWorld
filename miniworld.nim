@@ -1,4 +1,5 @@
 import raylib
+import std/math
 
 const GridSize = 256
 
@@ -126,7 +127,37 @@ void main()
 }
 """
 
-initWindow(1200, 800, "Nim Mini World - 3D Terrain with Blended Elevation Tiles")
+# Function to sample ground height from heightmap at arbitrary world (X, Z) coordinates
+proc getTerrainHeight(img: Image, mapPos: Vector3, mapSize: Vector3, worldX, worldZ: float32): float32 =
+  let localX = worldX - mapPos.x
+  let localZ = worldZ - mapPos.z
+  
+  let normX = clamp(localX / mapSize.x, 0.0, 1.0)
+  let normZ = clamp(localZ / mapSize.z, 0.0, 1.0)
+  
+  let imgX = normX * (img.width.float32 - 1.0)
+  let imgZ = normZ * (img.height.float32 - 1.0)
+  
+  let x0 = imgX.int32
+  let z0 = imgZ.int32
+  let x1 = min(x0 + 1, img.width - 1)
+  let z1 = min(z0 + 1, img.height - 1)
+  
+  let tx = imgX - x0.float32
+  let tz = imgZ - z0.float32
+  
+  let c00 = getImageColor(img, x0, z0).r.float32
+  let c10 = getImageColor(img, x1, z0).r.float32
+  let c01 = getImageColor(img, x0, z1).r.float32
+  let c11 = getImageColor(img, x1, z1).r.float32
+  
+  let top = c00 * (1.0 - tx) + c10 * tx
+  let bottom = c01 * (1.0 - tx) + c11 * tx
+  let h = top * (1.0 - tz) + bottom * tz
+  
+  result = mapPos.y + (h / 255.0) * mapSize.y
+
+initWindow(1200, 800, "Nim Mini World - Vehicle Drive & Terrain Elevation")
 setTargetFPS(60)
 
 # Load heightmap image
@@ -142,11 +173,30 @@ genTextureMipmaps(tilesetTex)
 setTextureFilter(tilesetTex, Trilinear)
 
 # Generate 3D heightmap mesh and load as a Model
-var mapMesh = genMeshHeightmap(heightmapImg, Vector3(x: GridSize.float32, y: 50.0, z: GridSize.float32))
+let mapSize = Vector3(x: GridSize.float32, y: 50.0, z: GridSize.float32)
+var mapMesh = genMeshHeightmap(heightmapImg, mapSize)
 var mapModel = loadModelFromMesh(mapMesh)
 
 # Center map around world (0, 0, 0)
 let mapPos = Vector3(x: -GridSize.float32 / 2.0, y: 0.0, z: -GridSize.float32 / 2.0)
+
+# Load Vehicle Model
+var vehicleModel = loadModel("assets/vehicle-truck.glb")
+let vehicleScale = Vector3(x: 5.0, y: 5.0, z: 5.0)
+
+# Vehicle State
+var vehiclePos = Vector3(x: 0.0, y: 0.0, z: 0.0)
+var vehicleYaw: float32 = 0.0 # Yaw angle in degrees
+var vehicleSpeed: float32 = 0.0
+
+const MaxForwardSpeed = 30.0
+const MaxReverseSpeed = -15.0
+const Acceleration = 40.0
+const Friction = 25.0
+const TurnSpeed = 130.0 # degrees per second
+
+# Initial position on terrain height
+vehiclePos.y = getTerrainHeight(heightmapImg, mapPos, mapSize, vehiclePos.x, vehiclePos.z)
 
 # Load Shader
 let shader = loadShaderFromMemory(VertexShader, FragmentShader)
@@ -167,8 +217,6 @@ setShaderValue(shader, locLightColor, sunColor)
 setShaderValue(shader, locAmbient, ambientColor)
 
 # Attach shader & textures to map model material
-# texture0 -> Albedo (tilesetTex)
-# texture1 -> Metalness (heightMapTex)
 Model(mapModel).materials[0].shader = shader
 Model(mapModel).materials[0].maps[Albedo].texture = tilesetTex
 Model(mapModel).materials[0].maps[Metalness].texture = heightMapTex
@@ -177,17 +225,99 @@ Model(mapModel).materials[0].maps[Metalness].texture = heightMapTex
 let sunPos = Vector3(x: 120.0, y: 240.0, z: 70.0)
 
 var camera = Camera3D(
-  position: Vector3(x: 0, y: 90, z: 170),
+  position: Vector3(x: 0, y: 20, z: 30),
   target: Vector3(x: 0, y: 0, z: 0),
   up: Vector3(x: 0, y: 1, z: 0),
   fovy: 45.0,
   projection: Perspective
 )
 
+var useVehicleCam = true
+
 disableCursor()
 
 while not windowShouldClose():
-  updateCamera(camera, Free)
+  let dt = getFrameTime()
+
+  # Toggle camera mode with 'C' key
+  if isKeyPressed(C):
+    useVehicleCam = not useVehicleCam
+    if not useVehicleCam:
+      enableCursor()
+    else:
+      disableCursor()
+
+  # Keyboard Controls for Vehicle
+  var accelerating = false
+
+  if isKeyDown(W) or isKeyDown(Up):
+    accelerating = true
+    vehicleSpeed += Acceleration * dt
+    if vehicleSpeed > MaxForwardSpeed:
+      vehicleSpeed = MaxForwardSpeed
+
+  if isKeyDown(S) or isKeyDown(Down):
+    accelerating = true
+    vehicleSpeed -= Acceleration * dt
+    if vehicleSpeed < MaxReverseSpeed:
+      vehicleSpeed = MaxReverseSpeed
+
+  if not accelerating:
+    if vehicleSpeed > 0.0:
+      vehicleSpeed -= Friction * dt
+      if vehicleSpeed < 0.0: vehicleSpeed = 0.0
+    elif vehicleSpeed < 0.0:
+      vehicleSpeed += Friction * dt
+      if vehicleSpeed > 0.0: vehicleSpeed = 0.0
+
+  if isKeyDown(A) or isKeyDown(Left):
+    let dir = if vehicleSpeed >= 0.0: 1.0 else: -1.0
+    vehicleYaw += TurnSpeed * dt * dir
+
+  if isKeyDown(D) or isKeyDown(Right):
+    let dir = if vehicleSpeed >= 0.0: 1.0 else: -1.0
+    vehicleYaw -= TurnSpeed * dt * dir
+
+  # Update vehicle movement position
+  let yawRad = vehicleYaw * (PI / 180.0)
+  let fwd = Vector3(x: sin(yawRad), y: 0.0, z: cos(yawRad))
+
+  vehiclePos.x += fwd.x * vehicleSpeed * dt
+  vehiclePos.z += fwd.z * vehicleSpeed * dt
+
+  # Clamp vehicle position within terrain bounds
+  let margin = 10.0
+  let minX = mapPos.x + margin
+  let maxX = mapPos.x + mapSize.x - margin
+  let minZ = mapPos.z + margin
+  let maxZ = mapPos.z + mapSize.z - margin
+
+  vehiclePos.x = clamp(vehiclePos.x, minX, maxX)
+  vehiclePos.z = clamp(vehiclePos.z, minZ, maxZ)
+
+  # Update vehicle height to rest on top of heightmap ground
+  let groundHeight = getTerrainHeight(heightmapImg, mapPos, mapSize, vehiclePos.x, vehiclePos.z)
+  vehiclePos.y = groundHeight
+
+  # Camera Logic
+  if useVehicleCam:
+    const camDistance = 22.0
+    const camHeight = 9.0
+    
+    # Position camera behind and a little above the vehicle, looking towards it
+    camera.position = Vector3(
+      x: vehiclePos.x - fwd.x * camDistance,
+      y: vehiclePos.y + camHeight,
+      z: vehiclePos.z - fwd.z * camDistance
+    )
+    camera.target = Vector3(
+      x: vehiclePos.x,
+      y: vehiclePos.y + 2.5,
+      z: vehiclePos.z
+    )
+    camera.up = Vector3(x: 0, y: 1, z: 0)
+  else:
+    updateCamera(camera, Free)
 
   # Pass camera view position to shader for specular highlights
   setShaderValue(shader, locViewPos, camera.position)
@@ -198,6 +328,10 @@ while not windowShouldClose():
   beginMode3D(camera)
   # Draw 3D floor terrain model with blended tile shader
   drawModel(Model(mapModel), mapPos, 1.0, White)
+
+  # Draw Vehicle model positioned above heightmap ground (rotated 180° so front faces forward)
+  let modelDrawYaw = vehicleYaw + 180.0
+  drawModel(Model(vehicleModel), vehiclePos, Vector3(x: 0, y: 1, z: 0), modelDrawYaw, vehicleScale, White)
   
   # Draw visual sun sphere in sky
   drawSphere(sunPos, 8.0, Yellow)
@@ -206,7 +340,19 @@ while not windowShouldClose():
   endMode3D()
 
   drawFPS(10, 10)
-  drawText("Free Camera: WASD + Q/E + Mouse | Blended Tile Edges Active", 10, 35, 20, Darkgray)
+  
+  if useVehicleCam:
+    drawText("Vehicle Controls: W/S (Forward/Reverse) | A/D (Steer Left/Right)", 10, 35, 20, Darkgray)
+    drawText("Camera pinned behind vehicle. Press 'C' to toggle Free Camera", 10, 60, 18, Maroon)
+  else:
+    drawText("Free Camera Active: WASD + Mouse | Press 'C' to pin camera to Vehicle", 10, 35, 20, Darkgray)
+
+  drawText("Vehicle Pos: (" & $vehiclePos.x.int & ", " & $vehiclePos.y.int & ", " & $vehiclePos.z.int & ") | Yaw: " & $vehicleYaw.int & " deg", 10, 85, 18, Darkgray)
+  
+  if isKeyPressed(P):
+    takeScreenshot("vehicle_preview.png")
+
   endDrawing()
 
 closeWindow()
+

@@ -1,0 +1,57 @@
+# Nim build & compiler output
+nimcache/
+.nimcache/
+nimblecache/
+htmldocs/
+*.nims.out
+
+# Executables & binary build targets
+/miniworld
+/test_height
+/test_shader_map
+/scratch/test_model_orient
+/scratch/test_slope_vehicle
+
+# Compiled binary extensions & object files
+*.exe
+*.out
+*.app
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Secrets, Credentials & Private Configuration
+.env
+.env.*
+!.env.example
+!.env.template
+*.env
+secrets/
+secrets.*
+*.secret.*
+config.secret.*
+credentials.json
+credentials.yaml
+credentials.yml
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Logs & Temporary files
+*.log
+*.tmp
+*.temp
+
+# OS & IDE metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
